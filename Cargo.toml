@@ -1,0 +1,18 @@
+[package]
+name = "solver24"
+edition = "2024"
+description = "An exact-math solver for the 24 puzzle and combinatorial equations"
+
+[dependencies]
+arrayvec = "0.7.6"
+num-bigint = "0.4.6"
+num-rational = "0.4"
+num-traits = "0.2.19"
+rayon = "1.8"
+statrs = "0.18.0"
+
+[profile.release]
+opt-level = 3          # Maximize execution speed (crucial for O(n!) math)
+lto = true             # Enable Link Time Optimization (further speed boosts)
+codegen-units = 1      # Compile as a single unit for better optimizations
+panic = "abort"        # Reduce binary size and overhead
