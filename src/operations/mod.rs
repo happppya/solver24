@@ -50,12 +50,24 @@ pub fn powers_and_roots() -> Vec<Op> { vec![Op::Pow, Op::Root] }
 pub fn logarithms() -> Vec<Op> { vec![Op::Log] }
 pub fn factorials_and_gamma() -> Vec<Op> { vec![Op::Factorial, Op::Gamma] }
 
-pub fn trig() -> Vec<Op> {
+pub fn trig_standard() -> Vec<Op> {
     vec![
-        Op::Sin, Op::Cos, Op::Tan, Op::Asin, Op::Acos, Op::Atan,
-        Op::Sec, Op::Csc, Op::Cot
+        Op::Sin, Op::Cos, Op::Tan,
     ]
 }
+
+pub fn trig_inverse() -> Vec<Op> {
+    vec![
+        Op::Asin, Op::Acos, Op::Atan,
+    ]
+}
+
+pub fn trig_cofunctions() -> Vec<Op> {
+    vec![
+        Op::Sec, Op::Csc, Op::Cot,
+    ]
+}
+
 
 pub fn calculus() -> Vec<Op> { vec![Op::IntegralX, Op::IntegralX2] }
 

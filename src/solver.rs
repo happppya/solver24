@@ -7,16 +7,49 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::expr::{AstArena, Expr, ExprTree, Op};
 use crate::operations::{apply_binary, apply_unary};
 
+/// Granularity for numerical hashing to prevent non-associative precision drift.
+const HASH_EPSILON: f64 = 10_000.0;
+
+/// Hashes an individual value for permutation-invariant accumulation.
+#[inline(always)]
+fn hash_value(val: f64) -> u64 {
+    let normalized = (val * HASH_EPSILON).round() as i64;
+    let mut hasher = FxHasher::default();
+    normalized.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Generates a permutation-invariant hash of the active expression pool.
 #[inline(always)]
 fn hash_pool(pool: &[Expr]) -> u64 {
     pool.iter().fold(0_u64, |acc, expr| {
-        let val = (expr.value.to_f64() * 1_000_000.0).round() as i64;
-        let mut hasher = FxHasher::default();
-        val.hash(&mut hasher);
         // Wrapping add guarantees permutation invariance without O(N log N) sorting
-        acc.wrapping_add(hasher.finish())
+        acc.wrapping_add(hash_value(expr.value.to_f64()))
     })
+}
+
+/// Generates a hash for a prospective binary operation state without allocating.
+#[inline(always)]
+fn hash_next_state_binary(pool: &[Expr], skip_i: usize, skip_j: usize, new_val: f64) -> u64 {
+    let mut hash = hash_value(new_val);
+    for (idx, expr) in pool.iter().enumerate() {
+        if idx != skip_i && idx != skip_j {
+            hash = hash.wrapping_add(hash_value(expr.value.to_f64()));
+        }
+    }
+    hash
+}
+
+/// Generates a hash for a prospective unary operation state without allocating.
+#[inline(always)]
+fn hash_next_state_unary(pool: &[Expr], skip_i: usize, new_val: f64) -> u64 {
+    let mut hash = hash_value(new_val);
+    for (idx, expr) in pool.iter().enumerate() {
+        if idx != skip_i {
+            hash = hash.wrapping_add(hash_value(expr.value.to_f64()));
+        }
+    }
+    hash
 }
 
 /// A highly parallelized, AST-generating search solver.
@@ -26,7 +59,7 @@ fn hash_pool(pool: &[Expr]) -> u64 {
 /// use arrayvec::ArrayVec;
 /// use crate::expr::{AstArena, Op};
 /// // Let `ops` be an array of supported operations and `pool` an initialized ArrayVec of Expr.
-/// // let solver = Solver::new(24.0, 24.0, 24.0, &ops);
+/// // let solver = Solver::new(24.0, 24.0, 24.0, &ops, None);
 /// // let base_arena = AstArena::default();
 /// // let results = solver.solve_parallel(pool, &base_arena);
 /// ```
@@ -74,19 +107,22 @@ impl<'a> Solver<'a> {
         cache: &mut FxHashSet<u64>,
         transient_arena: &mut AstArena,
         results_arena: &mut AstArena,
-        counter: &AtomicUsize, // ADDED: Shared atomic counter reference
+        counter: &AtomicUsize,
+        local_steps: &mut usize,
     ) -> Vec<Expr> {
-        // ADDED: Immediate thread pruning
-        if let Some(max) = self.limit {
-            if counter.load(Ordering::Relaxed) >= max {
-                return vec![];
+        // Mask check to batch atomic loads and prevent hardware cache-line contention
+        *local_steps += 1;
+        if *local_steps & 0x3FF == 0 {
+            if let Some(max) = self.limit {
+                if counter.load(Ordering::Relaxed) >= max {
+                    return vec![];
+                }
             }
         }
 
         if pool.len() == 1 {
             let val = pool[0].value.to_f64();
             if val >= self.target_min && val <= self.target_max {
-                // ADDED: Safely increment and verify limit before persisting
                 if let Some(max) = self.limit {
                     if counter.fetch_add(1, Ordering::Relaxed) >= max {
                         return vec![];
@@ -116,6 +152,12 @@ impl<'a> Solver<'a> {
                         if new_val.is_too_large() {
                             continue;
                         }
+
+                        let next_hash = hash_next_state_binary(&pool, i, j, new_val.to_f64());
+                        if cache.contains(&next_hash) {
+                            continue;
+                        }
+
                         let tree_idx = transient_arena.alloc(ExprTree::Node(
                             op,
                             pool[i].tree_idx,
@@ -130,13 +172,13 @@ impl<'a> Solver<'a> {
                             unary_depth: 0,
                         });
 
-                        // UPDATED: Pass counter downstream
                         solutions.extend(self.solve_pure(
                             new_pool,
                             cache,
                             transient_arena,
                             results_arena,
                             counter,
+                            local_steps,
                         ));
                         transient_arena.truncate(checkpoint);
                     }
@@ -155,6 +197,12 @@ impl<'a> Solver<'a> {
                         if new_val.is_too_large() {
                             continue;
                         }
+
+                        let next_hash = hash_next_state_binary(&pool, i, j, new_val.to_f64());
+                        if cache.contains(&next_hash) {
+                            continue;
+                        }
+
                         let tree_idx = transient_arena.alloc(ExprTree::Node(
                             op,
                             pool[i].tree_idx,
@@ -170,13 +218,13 @@ impl<'a> Solver<'a> {
                             unary_depth: 0,
                         });
 
-                        // UPDATED: Pass counter downstream
                         solutions.extend(self.solve_pure(
                             new_pool,
                             cache,
                             transient_arena,
                             results_arena,
                             counter,
+                            local_steps,
                         ));
                         transient_arena.truncate(checkpoint);
                     }
@@ -194,6 +242,12 @@ impl<'a> Solver<'a> {
                     if new_val.is_too_large() {
                         continue;
                     }
+
+                    let next_hash = hash_next_state_unary(&pool, i, new_val.to_f64());
+                    if cache.contains(&next_hash) {
+                        continue;
+                    }
+
                     let tree_idx =
                         transient_arena.alloc(ExprTree::Node(op, pool[i].tree_idx, None));
                     let mut new_pool = pool.clone();
@@ -203,13 +257,13 @@ impl<'a> Solver<'a> {
                         unary_depth: pool[i].unary_depth + 1,
                     };
 
-                    // UPDATED: Pass counter downstream
                     solutions.extend(self.solve_pure(
                         new_pool,
                         cache,
                         transient_arena,
                         results_arena,
                         counter,
+                        local_steps,
                     ));
                     transient_arena.truncate(checkpoint);
                 }
@@ -298,13 +352,15 @@ impl<'a> Solver<'a> {
             .map(|(p, mut t_arena)| {
                 let mut local_cache = FxHashSet::default();
                 let mut results_arena = AstArena::default();
-                // UPDATED: Pass borrowed counter to worker
+                let mut local_steps = 0;
+                
                 let results = self.solve_pure(
                     p,
                     &mut local_cache,
                     &mut t_arena,
                     &mut results_arena,
                     &counter,
+                    &mut local_steps,
                 );
                 (results, results_arena)
             })

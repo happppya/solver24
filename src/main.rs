@@ -139,9 +139,9 @@ fn main() {
     active_operations.extend(operations::standard_operations());
     active_operations.extend(operations::powers_and_roots());
     active_operations.extend(operations::factorials_and_gamma());
-    active_operations.extend(operations::logarithms());
-    active_operations.extend(operations::trig());
-    active_operations.extend(operations::calculus());
+    //active_operations.extend(operations::logarithms());
+    active_operations.extend(operations::trig_standard());
+    //active_operations.extend(operations::calculus());
 
     let bases = [2];
     let widths = [4,8,16];
