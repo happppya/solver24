@@ -1,0 +1,8 @@
+cargo run 7 7 7 7 --limit 1 --percent-error 0
+
+    active_operations.extend(operations::standard_operations());
+    active_operations.extend(operations::powers_and_roots());
+    active_operations.extend(operations::factorials_and_gamma());
+    active_operations.extend(operations::trig_standard());
+
+20.30

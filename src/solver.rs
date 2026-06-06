@@ -4,13 +4,12 @@ use rustc_hash::{FxHashSet, FxHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::expr::{AstArena, Expr, ExprTree, Op};
 use crate::operations::{apply_binary, apply_unary};
+use crate::types::{AstArena, Expr, ExprTree, Op};
 
 /// Granularity for numerical hashing to prevent non-associative precision drift.
 const HASH_EPSILON: f64 = 10_000.0;
 
-/// Hashes an individual value for permutation-invariant accumulation.
 #[inline(always)]
 fn hash_value(val: f64) -> u64 {
     let normalized = (val * HASH_EPSILON).round() as i64;
@@ -19,16 +18,13 @@ fn hash_value(val: f64) -> u64 {
     hasher.finish()
 }
 
-/// Generates a permutation-invariant hash of the active expression pool.
 #[inline(always)]
 fn hash_pool(pool: &[Expr]) -> u64 {
     pool.iter().fold(0_u64, |acc, expr| {
-        // Wrapping add guarantees permutation invariance without O(N log N) sorting
         acc.wrapping_add(hash_value(expr.value.to_f64()))
     })
 }
 
-/// Generates a hash for a prospective binary operation state without allocating.
 #[inline(always)]
 fn hash_next_state_binary(pool: &[Expr], skip_i: usize, skip_j: usize, new_val: f64) -> u64 {
     let mut hash = hash_value(new_val);
@@ -40,7 +36,6 @@ fn hash_next_state_binary(pool: &[Expr], skip_i: usize, skip_j: usize, new_val: 
     hash
 }
 
-/// Generates a hash for a prospective unary operation state without allocating.
 #[inline(always)]
 fn hash_next_state_unary(pool: &[Expr], skip_i: usize, new_val: f64) -> u64 {
     let mut hash = hash_value(new_val);
@@ -52,30 +47,28 @@ fn hash_next_state_unary(pool: &[Expr], skip_i: usize, new_val: f64) -> u64 {
     hash
 }
 
-/// A highly parallelized, AST-generating search solver.
+/// A highly parallelized, AST-generating search solver with cyclic branch pruning.
 ///
 /// # Examples
 /// ```
 /// use arrayvec::ArrayVec;
 /// use crate::expr::{AstArena, Op};
-/// // Let `ops` be an array of supported operations and `pool` an initialized ArrayVec of Expr.
 /// // let solver = Solver::new(24.0, 24.0, 24.0, &ops, None);
 /// // let base_arena = AstArena::default();
 /// // let results = solver.solve_parallel(pool, &base_arena);
 /// ```
-pub struct Solver<'a> {
+pub struct Solver<> {
     pub target: f64,
     pub target_min: f64,
     pub target_max: f64,
-    pub operations: &'a [Op],
     comm_ops: Vec<Op>,
     non_comm_ops: Vec<Op>,
-    pub max_unary_depth: u8,
+    unary_ops: Vec<Op>,
     pub limit: Option<usize>,
 }
 
-impl<'a> Solver<'a> {
-    /// Constructs a new Solver, pre-partitioning operations for optimized pipeline execution.
+impl<'a> Solver<> {
+    /// Constructs a new Solver, pre-partitioning operations by arity and commutativity.
     pub fn new(
         target: f64,
         target_min: f64,
@@ -83,19 +76,23 @@ impl<'a> Solver<'a> {
         operations: &'a [Op],
         limit: Option<usize>,
     ) -> Self {
-        let (comm_ops, non_comm_ops): (Vec<Op>, Vec<Op>) = operations
+        let unary_ops: Vec<Op> = operations
             .iter()
             .copied()
-            .partition(|op| op.is_commutative());
+            .filter(|op| op.is_unary())
+            .collect();
+        let binary_ops = operations.iter().copied().filter(|op| !op.is_unary());
+
+        let (comm_ops, non_comm_ops): (Vec<Op>, Vec<Op>) =
+            binary_ops.partition(|op| op.is_commutative());
 
         Solver {
             target,
             target_min,
             target_max,
-            operations,
             comm_ops,
             non_comm_ops,
-            max_unary_depth: 2,
+            unary_ops,
             limit,
         }
     }
@@ -110,7 +107,6 @@ impl<'a> Solver<'a> {
         counter: &AtomicUsize,
         local_steps: &mut usize,
     ) -> Vec<Expr> {
-        // Mask check to batch atomic loads and prevent hardware cache-line contention
         *local_steps += 1;
         if *local_steps & 0x3FF == 0 {
             if let Some(max) = self.limit {
@@ -128,7 +124,6 @@ impl<'a> Solver<'a> {
                         return vec![];
                     }
                 }
-
                 let mut sol = pool[0].clone();
                 sol.tree_idx = results_arena.copy_from(transient_arena, sol.tree_idx);
                 return vec![sol];
@@ -144,7 +139,7 @@ impl<'a> Solver<'a> {
         let mut solutions = Vec::new();
         let checkpoint = transient_arena.len();
 
-        // Commutative operations
+        // Commutative binary operations
         for i in 0..pool.len() {
             for j in (i + 1)..pool.len() {
                 for &op in &self.comm_ops {
@@ -169,7 +164,7 @@ impl<'a> Solver<'a> {
                         new_pool.push(Expr {
                             value: new_val,
                             tree_idx,
-                            unary_depth: 0,
+                            unary_mask: 0,
                         });
 
                         solutions.extend(self.solve_pure(
@@ -186,7 +181,7 @@ impl<'a> Solver<'a> {
             }
         }
 
-        // Non-commutative operations
+        // Non-commutative binary operations
         for i in 0..pool.len() {
             for j in 0..pool.len() {
                 if i == j {
@@ -215,7 +210,7 @@ impl<'a> Solver<'a> {
                         new_pool.push(Expr {
                             value: new_val,
                             tree_idx,
-                            unary_depth: 0,
+                            unary_mask: 0,
                         });
 
                         solutions.extend(self.solve_pure(
@@ -232,41 +227,44 @@ impl<'a> Solver<'a> {
             }
         }
 
-        // Unary operations
-        for i in 0..pool.len() {
-            if pool[i].unary_depth >= self.max_unary_depth {
+        // Unary operations: Restricted exclusively to the most recently generated node
+        // preventing permutation explosion on independent pool variables.
+        let new_node_idx = pool.len() - 1;
+        for &op in &self.unary_ops {
+            let op_mask = op.family_mask();
+            // Prune inverse operations and chained asymptotic families
+            if (pool[new_node_idx].unary_mask & op_mask) != 0 {
                 continue;
             }
-            for &op in self.operations {
-                if let Some(new_val) = apply_unary(op, &pool[i].value) {
-                    if new_val.is_too_large() {
-                        continue;
-                    }
 
-                    let next_hash = hash_next_state_unary(&pool, i, new_val.to_f64());
-                    if cache.contains(&next_hash) {
-                        continue;
-                    }
-
-                    let tree_idx =
-                        transient_arena.alloc(ExprTree::Node(op, pool[i].tree_idx, None));
-                    let mut new_pool = pool.clone();
-                    new_pool[i] = Expr {
-                        value: new_val,
-                        tree_idx,
-                        unary_depth: pool[i].unary_depth + 1,
-                    };
-
-                    solutions.extend(self.solve_pure(
-                        new_pool,
-                        cache,
-                        transient_arena,
-                        results_arena,
-                        counter,
-                        local_steps,
-                    ));
-                    transient_arena.truncate(checkpoint);
+            if let Some(new_val) = apply_unary(op, &pool[new_node_idx].value) {
+                if new_val.is_too_large() {
+                    continue;
                 }
+
+                let next_hash = hash_next_state_unary(&pool, new_node_idx, new_val.to_f64());
+                if cache.contains(&next_hash) {
+                    continue;
+                }
+
+                let tree_idx =
+                    transient_arena.alloc(ExprTree::Node(op, pool[new_node_idx].tree_idx, None));
+                let mut new_pool = pool.clone();
+                new_pool[new_node_idx] = Expr {
+                    value: new_val,
+                    tree_idx,
+                    unary_mask: pool[new_node_idx].unary_mask | op_mask,
+                };
+
+                solutions.extend(self.solve_pure(
+                    new_pool,
+                    cache,
+                    transient_arena,
+                    results_arena,
+                    counter,
+                    local_steps,
+                ));
+                transient_arena.truncate(checkpoint);
             }
         }
 
@@ -274,7 +272,6 @@ impl<'a> Solver<'a> {
     }
 
     /// Solves the target by chunking the initial combinatorial depth onto Rayon threads.
-    /// Returns mapped batches to avoid O(N) arena clones per solution string hit.
     pub fn solve_parallel(
         &self,
         pool: ArrayVec<Expr, 12>,
@@ -283,6 +280,37 @@ impl<'a> Solver<'a> {
         let mut first_gen_tasks = Vec::new();
         let counter = AtomicUsize::new(0);
 
+        // Initial pool unary tasks
+        for i in 0..pool.len() {
+            for &op in &self.unary_ops {
+                let op_mask = op.family_mask();
+                if (pool[i].unary_mask & op_mask) != 0 {
+                    continue;
+                }
+
+                if let Some(new_val) = apply_unary(op, &pool[i].value) {
+                    if new_val.is_too_large() {
+                        continue;
+                    }
+
+                    let mut transient_arena = base_arena.clone();
+                    let tree_idx =
+                        transient_arena.alloc(ExprTree::Node(op, pool[i].tree_idx, None));
+
+                    let mut new_pool = pool.clone();
+                    // Shift processed node to the end to align with `solve_pure` expectations
+                    let mut modified_expr = new_pool.swap_remove(i);
+                    modified_expr.value = new_val;
+                    modified_expr.tree_idx = tree_idx;
+                    modified_expr.unary_mask |= op_mask;
+                    new_pool.push(modified_expr);
+
+                    first_gen_tasks.push((new_pool, transient_arena));
+                }
+            }
+        }
+
+        // Initial pool commutative binary tasks
         for i in 0..pool.len() {
             for j in (i + 1)..pool.len() {
                 for &op in &self.comm_ops {
@@ -304,7 +332,7 @@ impl<'a> Solver<'a> {
                         new_pool.push(Expr {
                             value: new_val,
                             tree_idx,
-                            unary_depth: 0,
+                            unary_mask: 0,
                         });
 
                         first_gen_tasks.push((new_pool, transient_arena));
@@ -313,6 +341,7 @@ impl<'a> Solver<'a> {
             }
         }
 
+        // Initial pool non-commutative binary tasks
         for i in 0..pool.len() {
             for j in 0..pool.len() {
                 if i == j {
@@ -338,7 +367,7 @@ impl<'a> Solver<'a> {
                         new_pool.push(Expr {
                             value: new_val,
                             tree_idx,
-                            unary_depth: 0,
+                            unary_mask: 0,
                         });
 
                         first_gen_tasks.push((new_pool, transient_arena));
@@ -353,7 +382,7 @@ impl<'a> Solver<'a> {
                 let mut local_cache = FxHashSet::default();
                 let mut results_arena = AstArena::default();
                 let mut local_steps = 0;
-                
+
                 let results = self.solve_pure(
                     p,
                     &mut local_cache,

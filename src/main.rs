@@ -1,27 +1,26 @@
-//! Main entry point for the exact-math combinatorial solver.
-//!
-//! Handles command-line argument parsing, environment initialization,
-//! and aggregates parallel execution batches from the solver.
-
-mod expr;
 mod operations;
 mod solver;
+mod types;
 
 use arrayvec::ArrayVec;
 use std::collections::HashMap;
 use std::env;
+use std::time::Instant;
 
-use crate::expr::{AstArena, Expr, ExprTree, FastRatio, Value};
 use crate::solver::Solver;
+use crate::types::{AstArena, Expr, ExprTree, FastRatio, Value};
 
+/// Represents a validated, rendered mathematical solution.
 pub struct RenderedSolution {
     pub formula: String,
     pub value: f64,
     pub error: f64,
 }
 
-/// Formats and prints the top and bottom approximate solutions.
-fn print_top_bottom_approx(label: &str, sols: &[RenderedSolution]) {
+/// Formats and prints the top and bottom solutions for a given dataset.
+///
+/// Handles both exact and approximate solutions dynamically.
+fn print_solutions(label: &str, sols: &[RenderedSolution], is_exact: bool) {
     println!("\n=== {} Solutions (Total: {}) ===", label, sols.len());
     if sols.is_empty() {
         println!("None found.");
@@ -30,36 +29,34 @@ fn print_top_bottom_approx(label: &str, sols: &[RenderedSolution]) {
 
     println!("--- Top 10 Shortest ---");
     for (i, sol) in sols.iter().take(10).enumerate() {
-        println!("{}. {} = {:.4} ({:+.4})", i + 1, sol.formula, sol.value, sol.error);
-    }
-
-    if sols.len() > 10 {
-        println!("--- Top 10 Longest ---");
-        let start_idx = sols.len().saturating_sub(10).max(10);
-        for (i, sol) in sols[start_idx..].iter().enumerate() {
-            println!("{}. {} = {:.4} ({:+.4})", start_idx + i + 1, sol.formula, sol.value, sol.error);
+        if is_exact {
+            println!("{}. {} = 24", i + 1, sol.formula);
+        } else {
+            println!(
+                "{}. {} = {:.4} ({:+.4})",
+                i + 1,
+                sol.formula,
+                sol.value,
+                sol.error
+            );
         }
     }
-}
-
-/// Formats and prints the top and bottom exact solutions.
-fn print_top_bottom(label: &str, sols: &[RenderedSolution]) {
-    println!("\n=== {} Solutions (Total: {}) ===", label, sols.len());
-    if sols.is_empty() {
-        println!("None found.");
-        return;
-    }
-
-    println!("--- Top 10 Shortest ---");
-    for (i, sol) in sols.iter().take(10).enumerate() {
-        println!("{}. {} = 24", i + 1, sol.formula);
-    }
 
     if sols.len() > 10 {
         println!("--- Top 10 Longest ---");
         let start_idx = sols.len().saturating_sub(10).max(10);
         for (i, sol) in sols[start_idx..].iter().enumerate() {
-            println!("{}. {} = 24", start_idx + i + 1, sol.formula);
+            if is_exact {
+                println!("{}. {} = 24", start_idx + i + 1, sol.formula);
+            } else {
+                println!(
+                    "{}. {} = {:.4} ({:+.4})",
+                    start_idx + i + 1,
+                    sol.formula,
+                    sol.value,
+                    sol.error
+                );
+            }
         }
     }
 }
@@ -71,6 +68,7 @@ fn main() {
     let mut pct_error: Option<f64> = None;
     let mut limit: Option<usize> = None;
 
+    // TODO: Replace manual loop with `clap` parser
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--error" => {
@@ -123,7 +121,7 @@ fn main() {
     }
 
     let target_g = 24.0;
-    
+
     let margin = if let Some(err) = abs_error {
         err
     } else if let Some(pct) = pct_error {
@@ -139,13 +137,12 @@ fn main() {
     active_operations.extend(operations::standard_operations());
     active_operations.extend(operations::powers_and_roots());
     active_operations.extend(operations::factorials_and_gamma());
-    //active_operations.extend(operations::logarithms());
+    active_operations.extend(operations::calculus());
     active_operations.extend(operations::trig_standard());
-    //active_operations.extend(operations::calculus());
+    active_operations.extend(operations::trig_cofunctions());
+    active_operations.extend(operations::trig_inverse());
 
-    let bases = [2];
-    let widths = [4,8,16];
-    //active_operations.extend(operations::generate_shifts(&bases, &widths));
+    //active_operations.extend(operations::generate_shifts(&[2], &[32]));
 
     println!("Loaded {} operations.", active_operations.len());
 
@@ -158,9 +155,11 @@ fn main() {
                 eprintln!("Fatal: '{}' is not a valid number.", s);
                 std::process::exit(1);
             });
-            
-            // Bias stack allocation for whole numbers, fallback to float
-            let value = if parsed_num.fract() == 0.0 && parsed_num <= i64::MAX as f64 && parsed_num >= i64::MIN as f64 {
+
+            let value = if parsed_num.fract() == 0.0
+                && parsed_num <= i64::MAX as f64
+                && parsed_num >= i64::MIN as f64
+            {
                 Value::Exact(FastRatio::Small(parsed_num as i64, 1))
             } else {
                 Value::Approx(parsed_num)
@@ -169,35 +168,40 @@ fn main() {
             Expr {
                 value,
                 tree_idx: root_arena.alloc(ExprTree::Leaf(s.clone())),
-                unary_depth: 0,
+                unary_mask: 0,
             }
         })
         .collect();
 
     let solver = Solver::new(target_g, target_min, target_max, &active_operations, limit);
-    
+
     println!(
         "Exhaustive search starting... Target: {} (Range: {} - {})",
         target_g, target_min, target_max
     );
 
+    // Track parallel solver execution timing
+    let start_time = Instant::now();
     let all_solution_batches = solver.solve_parallel(pool, &root_arena);
+    let solver_duration = start_time.elapsed();
 
-    let mut unique_solutions = HashMap::new(); 
+    let mut unique_solutions = HashMap::new();
 
     for (batch, arena) in all_solution_batches {
-
         for sol in batch {
             let formula_str = arena.format(sol.tree_idx);
-            
-            // Vacuous string deduplication (Requires structural hash refactor)
+
+            // TODO: Vacuous string deduplication requires structural hash refactor to avoid String allocation overhead
             if !unique_solutions.contains_key(&formula_str) {
                 let val = sol.value.to_f64();
-                unique_solutions.insert(formula_str.clone(), RenderedSolution {
-                    formula: formula_str,
-                    value: val,
-                    error: val - target_g,
-                });
+                unique_solutions.insert(
+                    formula_str.clone(),
+                    RenderedSolution {
+                        formula: formula_str,
+                        value: val,
+                        error: val - target_g,
+                    },
+                );
             }
         }
     }
@@ -216,6 +220,8 @@ fn main() {
     exact_sols.sort_unstable_by_key(|e| e.formula.len());
     approx_sols.sort_unstable_by_key(|e| e.formula.len());
 
-    print_top_bottom("EXACT", &exact_sols);
-    print_top_bottom_approx("APPROXIMATE", &approx_sols);
+    print_solutions("EXACT", &exact_sols, true);
+    print_solutions("APPROXIMATE", &approx_sols, false);
+
+    println!("\n[Telemetry] Solver executed in: {:.2?}", solver_duration);
 }

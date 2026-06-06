@@ -1,4 +1,4 @@
-use crate::expr::{FastRatio, Op, Value};
+use crate::types::{FastRatio, Op, Value};
 use num_bigint::BigInt;
 use num_rational::Ratio;
 use num_traits::{ToPrimitive, Zero};

@@ -1,4 +1,4 @@
-use crate::expr::{Op, Value};
+use crate::types::{Op, Value};
 
 #[inline(always)]
 pub(crate) fn eval_binary(op: Op, val_a: &Value, val_b: &Value) -> Option<Value> {

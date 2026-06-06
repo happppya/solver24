@@ -46,6 +46,8 @@ impl Value {
         }
     }
 
+    /// Enforces strict mathematical barriers. NaN and Infinity states are viral
+    /// and will poison the hashing cache if allowed to propagate.
     #[inline(always)]
     pub fn is_too_large(&self) -> bool {
         match self {
@@ -57,16 +59,27 @@ impl Value {
 
 #[derive(Clone, Debug)]
 pub enum ExprTree {
+    // Note: Storing an owned String here bloats the node size to 32 bytes and 
+    // triggers heap allocations. Consider migrating to Interned strings or numeric IDs.
     Leaf(String),
     Node(Op, u32, Option<u32>),
 }
 
+/// A contiguous, flat-memory arena for AST generation.
 #[derive(Clone, Default, Debug)]
 pub struct AstArena {
     nodes: Vec<ExprTree>,
 }
 
 impl AstArena {
+    /// Pre-allocates arena capacity to prevent reallocation overhead during first-generation mapping.
+    #[inline(always)]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            nodes: Vec::with_capacity(capacity),
+        }
+    }
+
     #[inline(always)]
     pub fn alloc(&mut self, node: ExprTree) -> u32 {
         let idx = self.nodes.len() as u32;
@@ -77,6 +90,11 @@ impl AstArena {
     #[inline(always)]
     pub fn len(&self) -> u32 {
         self.nodes.len() as u32
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
     }
 
     #[inline(always)]
@@ -134,6 +152,40 @@ impl Op {
         matches!(self, Op::Add | Op::Mult)
     }
 
+    /// Identifies whether the operation has an arity of one.
+    #[inline]
+    pub fn is_unary(&self) -> bool {
+        matches!(
+            self,
+            Op::Factorial
+                | Op::Gamma
+                | Op::Sin
+                | Op::Cos
+                | Op::Tan
+                | Op::Asin
+                | Op::Acos
+                | Op::Atan
+                | Op::Sec
+                | Op::Csc
+                | Op::Cot
+        )
+    }
+
+    /// Returns a bitmask representing the operation's asymptotic family.
+    /// Used by the solver to outright prune cyclical loops (e.g., sin(cos(x)) or sin(asin(x))).
+    #[inline]
+    pub fn family_mask(&self) -> u32 {
+        match self {
+            // Standard Trig: Bit 0
+            Op::Sin | Op::Cos | Op::Tan | Op::Sec | Op::Csc | Op::Cot => 1 << 0,
+            // Inverse Trig: Bit 1
+            Op::Asin | Op::Acos | Op::Atan => 1 << 1,
+            // Gamma / Factorial: Bit 2
+            Op::Factorial | Op::Gamma => 1 << 2,
+            _ => 0,
+        }
+    }
+
     /// Formats the operation into a human-readable string representation.
     ///
     /// # Panics
@@ -187,6 +239,6 @@ pub struct Expr {
     pub value: Value,
     /// The unique index mapping this expression to its position in the AST.
     pub tree_idx: u32,
-    /// The nesting level of unary operations wrapping this expression.
-    pub unary_depth: u8,
+    /// The bitmask tracking the execution history of unary families to prevent cyclical explosion.
+    pub unary_mask: u32,
 }
