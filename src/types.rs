@@ -235,10 +235,10 @@ impl Op {
 /// Represents an evaluated node or partial branch within the expression tree.
 #[derive(Clone, Debug)]
 pub struct Expr {
-    /// The exact or approximate numerical value of this node.
+    /// Exact or approximate numerical value of this node.
     pub value: Value,
-    /// The unique index mapping this expression to its position in the AST.
+    /// Unique index mapping this expression to its position in the AST.
     pub tree_idx: u32,
-    /// The bitmask tracking the execution history of unary families to prevent cyclical explosion.
+    /// Bitmask tracking the execution history of unary families to prevent cyclical explosion.
     pub unary_mask: u32,
 }

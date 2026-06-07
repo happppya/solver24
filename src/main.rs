@@ -138,11 +138,11 @@ fn main() {
     active_operations.extend(operations::powers_and_roots());
     active_operations.extend(operations::factorials_and_gamma());
     active_operations.extend(operations::calculus());
-    active_operations.extend(operations::trig_standard());
-    active_operations.extend(operations::trig_cofunctions());
-    active_operations.extend(operations::trig_inverse());
+    //active_operations.extend(operations::trig_standard());
+    //active_operations.extend(operations::trig_cofunctions());
+    //active_operations.extend(operations::trig_inverse());
 
-    //active_operations.extend(operations::generate_shifts(&[2], &[32]));
+    active_operations.extend(operations::generate_shifts(&[2], &[32]));
 
     println!("Loaded {} operations.", active_operations.len());
 
