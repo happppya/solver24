@@ -7,22 +7,31 @@ The classic "Make 24" game is a mathematical puzzle where a player is given four
 
 ## Usage
 
-Compile and run in release mode for best performance
-```
+Compile and run in release mode for best performance:
+```bash
 cargo build --release
 ```
 
 Follow the execution syntax:
-```
+```bash
 cargo run --release -- [FLAGS] [NUMBERS...]
 ```
 
 **Configuration Flags:**
- - --error (FLOAT): Sets an absolute $\pm$ tolerance around the target (24.0).
- - --percent-error (FLOAT): Sets a relative percentage tolerance based on the target. Note: This is mutually exclusive with --error.
- - --limit (INTEGER): Imposes a hard ceiling on the number of generated abstract syntax trees to prevent unbounded memory exhaustion during wide permutations.
 
-Example:
+* `-fast` or `--fast`: Activates Priority Queue-driven Best-First Search. Short-circuits and instantly halts execution upon finding the first valid abstract syntax tree.
+* `--error <FLOAT>`: Sets an absolute ± tolerance around the target.
+* `--percent-error <FLOAT>`: Sets a relative percentage tolerance based on the target. *Note: This is mutually exclusive with `--error`.*
+* `--limit <INTEGER>`: Imposes a hard ceiling on the number of generated abstract syntax trees to prevent unbounded memory exhaustion during wide permutations.
+
+**Examples:**
+
+Run an exhaustive search with a relative error margin:
+```bash
+cargo run --release -- --percent-error 0.1 10 14 2 3
 ```
-cargo run --release --percent-error 0.1 10 14 2 3
+
+Run in fast mode to instantly find a single exact solution:
+```bash
+cargo run --release -- -fast 7 7 7 7
 ```
