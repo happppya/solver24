@@ -20,7 +20,7 @@ pub struct RenderedSolution {
 /// Formats and prints the top and bottom solutions for a given dataset.
 ///
 /// Handles both exact and approximate solutions dynamically.
-fn print_solutions(label: &str, sols: &[RenderedSolution], is_exact: bool) {
+fn print_solutions(label: &str, sols: &[RenderedSolution], is_exact: bool, target: f64) {
     println!("\n=== {} Solutions (Total: {}) ===", label, sols.len());
     if sols.is_empty() {
         println!("None found.");
@@ -30,7 +30,7 @@ fn print_solutions(label: &str, sols: &[RenderedSolution], is_exact: bool) {
     println!("--- Top 10 Shortest ---");
     for (i, sol) in sols.iter().take(10).enumerate() {
         if is_exact {
-            println!("{}. {} = 24", i + 1, sol.formula);
+            println!("{}. {} = {}", i + 1, sol.formula, target);
         } else {
             println!(
                 "{}. {} = {:.4} ({:+.4})",
@@ -47,7 +47,7 @@ fn print_solutions(label: &str, sols: &[RenderedSolution], is_exact: bool) {
         let start_idx = sols.len().saturating_sub(10).max(10);
         for (i, sol) in sols[start_idx..].iter().enumerate() {
             if is_exact {
-                println!("{}. {} = 24", start_idx + i + 1, sol.formula);
+                println!("{}. {} = {}", start_idx + i + 1, sol.formula, target);
             } else {
                 println!(
                     "{}. {} = {:.4} ({:+.4})",
@@ -67,10 +67,12 @@ fn main() {
     let mut abs_error: Option<f64> = None;
     let mut pct_error: Option<f64> = None;
     let mut limit: Option<usize> = None;
+    let mut fast_mode = false;
 
     // TODO: Replace manual loop with `clap` parser
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "-fast" | "--fast" => fast_mode = true,
             "--error" => {
                 let val_str = args.next().unwrap_or_else(|| {
                     eprintln!("Fatal: Missing value for --error");
@@ -120,7 +122,10 @@ fn main() {
         ];
     }
 
-    let target_g = 24.0;
+    // 11 12 4 6 2 9 for 1123: (Gamma((11 / Gamma(root((9 RCIRC_2^32 2), (6 ^ 4))))) >>_2^32 12) = 1123
+    // 5 6! (5040) 9 4 1: 5*720 = 3600. 3600 - (9 * 4 + 1) = 3563
+
+    let target_g = 368.0;
 
     let margin = if let Some(err) = abs_error {
         err
@@ -137,10 +142,12 @@ fn main() {
     active_operations.extend(operations::standard_operations());
     active_operations.extend(operations::powers_and_roots());
     active_operations.extend(operations::factorials_and_gamma());
-    active_operations.extend(operations::calculus());
+    //active_operations.extend(operations::calculus());
     //active_operations.extend(operations::trig_standard());
     //active_operations.extend(operations::trig_cofunctions());
     //active_operations.extend(operations::trig_inverse());
+
+    
 
     active_operations.extend(operations::generate_shifts(&[2], &[32]));
 
@@ -176,12 +183,36 @@ fn main() {
     let solver = Solver::new(target_g, target_min, target_max, &active_operations, limit);
 
     println!(
-        "Exhaustive search starting... Target: {} (Range: {} - {})",
+        "Search starting... Target: {} (Range: {} - {})",
         target_g, target_min, target_max
     );
 
-    // Track parallel solver execution timing
     let start_time = Instant::now();
+
+    // Fast Execution Path: Short-circuit on first valid AST
+    if fast_mode {
+        if let Some((sol, arena)) = solver.find_first(pool, &root_arena) {
+            let solver_duration = start_time.elapsed();
+            let formula_str = arena.format(sol.tree_idx);
+            let val = sol.value.to_f64();
+            let error = val - target_g;
+
+            println!("\n=== FAST SOLUTION FOUND ===");
+            if error.abs() < 1e-9 {
+                println!("{} = {}", formula_str, target_g);
+            } else {
+                println!("{} = {:.4} ({:+.4})", formula_str, val, error);
+            }
+            println!("\n[Telemetry] Target acquired in: {:.2?}", solver_duration);
+        } else {
+            let solver_duration = start_time.elapsed();
+            println!("\n=== FAST SOLUTION NOT FOUND ===");
+            println!("\n[Telemetry] Search space exhausted in: {:.2?}", solver_duration);
+        }
+        return;
+    }
+
+    // Exhaustive Execution Path: Parallel generation and sorting
     let all_solution_batches = solver.solve_parallel(pool, &root_arena);
     let solver_duration = start_time.elapsed();
 
@@ -220,8 +251,8 @@ fn main() {
     exact_sols.sort_unstable_by_key(|e| e.formula.len());
     approx_sols.sort_unstable_by_key(|e| e.formula.len());
 
-    print_solutions("EXACT", &exact_sols, true);
-    print_solutions("APPROXIMATE", &approx_sols, false);
+    print_solutions("EXACT", &exact_sols, true, target_g);
+    print_solutions("APPROXIMATE", &approx_sols, false, target_g);
 
     println!("\n[Telemetry] Solver executed in: {:.2?}", solver_duration);
 }
